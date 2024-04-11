@@ -1,5 +1,8 @@
-﻿using System.Diagnostics;
+﻿using System.Data.SqlClient;
+using System.Diagnostics;
 using System.Text;
+using Dapper;
+using Xabe.FFmpeg;
 
 namespace FFMPEGEncoder
 {
@@ -7,78 +10,191 @@ namespace FFMPEGEncoder
     {
         static async Task Main()
         {
-            // Đặt mã hóa đầu vào và đầu ra của Console thành Unicode
             Console.InputEncoding = Console.OutputEncoding = Encoding.Unicode;
 
-            // Đường dẫn đến thư mục chứa các file MKV
-            Console.Write("Thư mục file: ");
+            string defaultFontName = "Arial";
+            Console.Write($"Tên font (mặc định {defaultFontName}): ");
+            var fontName = Console.ReadLine();
 
-            string directory = Console.ReadLine() ?? string.Empty;
+            if (string.IsNullOrEmpty(fontName)) fontName = defaultFontName;
 
-            // Đường dẫn đến logo
-            string logo = @"D:\BiliBili\logo-720.png";
-            string fontName = "Cascadia Code";
+            int defaultFontSize = 17;
+            Console.Write($"Kích cỡ font (mặc định {defaultFontSize}): ");
 
-            int bitrate = 1500;
-            // Kiểm tra xem thư mục output có tồn tại không, nếu không thì tạo mới
-            string outputDirectory = Path.Combine(directory, "output");
-            if (!Directory.Exists(outputDirectory))
+
+            var isNumber = int.TryParse(Console.ReadLine(), out var fontSize);
+
+            if (!isNumber || fontSize <= 0)
             {
-                Directory.CreateDirectory(outputDirectory);
+                Console.WriteLine($"Kích cỡ quá nhỏ hoặc nhập sai, để mặc định : {defaultFontSize}");
+                fontSize = defaultFontSize;
             }
 
-            // Lặp qua các file trong thư mục input
-            string[] mkvFiles = Directory.GetFiles(directory, "*.mkv");
+            string logo = "Images/logo.png";
 
-            Console.WriteLine("Đang xử lý...");
+            const int bitRate = 1500;
 
-            foreach (string inputFile in mkvFiles)
+            string path;
+            do
             {
-                var fileName = Path.GetFileNameWithoutExtension(inputFile);
-                var outputFile = Path.Combine(outputDirectory, fileName + ".mp4");
+                Console.Write("Đường dẫn: ");
+                path = Console.ReadLine() ?? "";
+            } while (!Path.Exists(path));
 
-                StringBuilder argumentsBuilder = new StringBuilder();
-                argumentsBuilder.AppendFormat("-i \"{0}\" ", DoubleSlat(inputFile));
-                argumentsBuilder.AppendFormat("-i \"{0}\" ", DoubleSlat(logo));
-                argumentsBuilder.Append("-filter_complex \"");
-                argumentsBuilder.Append("[0:v][1:v] overlay=x=main_w-overlay_w-(main_w*0.01):y=main_h*0.01, ");
-                argumentsBuilder.Append($"subtitles='{EscapeString(DoubleSlat(inputFile))}':force_style='Fontname={fontName}'\" ");
-                argumentsBuilder.Append($"-c:v h264_nvenc -b:v {bitrate}k -c:a copy ");
-                argumentsBuilder.Append($"\"{DoubleSlat(outputFile)}\"");
-                argumentsBuilder.Append(" -y");//Force
+            var files = Directory.GetFiles(path, "*.mkv", SearchOption.AllDirectories);
+
+            Console.WriteLine($"Chuẩn bị xử lý {files.Length} files...");
+
+            FFmpeg.SetExecutablesPath("Tools");
 
 
-                string arguments = argumentsBuilder.ToString();
-
-                var startInfo = new ProcessStartInfo
+            foreach (var file in files)
+            {
+                try
                 {
-                    FileName = @"Tools\ffmpeg",
-                    Arguments = arguments,
-                    UseShellExecute = false,
-                    CreateNoWindow = false
-                };
+                    var outputPath = await EncodeVideo(file, logo, fontName, fontSize, bitRate);
+                    if (CheckAvailableSize(file, outputPath))
+                    {
+                        Console.WriteLine($"Encode thành công: {file}");
+                        File.Delete(file);
+                    }
+                    else
+                    {
 
-                using var process = new Process();
-                process.StartInfo = startInfo;
-                process.Start();
-
-                await process.WaitForExitAsync();
-                //process.WaitForExit();
-
-                Console.WriteLine($"Xử lý hoàn tất,output: {outputFile}");
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"Encode thất bại - {file}");
+                        Console.ResetColor();
+                    }
+                }
+                catch (Exception e)
+                {
+                    
+                    Console.WriteLine($"Lỗi {e}");
+                }
+                finally
+                {
+                    await Task.Delay(1000);
+                }
             }
 
             Console.WriteLine("Hoàn thành!");
             Console.ReadLine();
         }
 
-        static string EscapeString(string input)
+        static async Task<List<Episode>> GetMkvFiles()
         {
-            return input
-                .Replace(":", @"\:");
+
+            var conn = new SqlConnection("Data Source=TalonEzio;Initial Catalog=BiliBiliDownloader;Integrated Security=True;TrustServerCertificate=True");
+
+            return (await conn.QueryAsync<Episode>("Select * from Episodes where (Encoded is null or encoded = 0) and Done = 1")).ToList();
         }
 
-        static string DoubleSlat(string input)
+        static async Task UpdateEncodePath(int episodeId, string encodePath, bool done)
+        {
+            var doneInt = done ? 1 : 0;
+
+            var conn = new SqlConnection("Data Source=TalonEzio;Initial Catalog=BiliBiliDownloader;Integrated Security=True;TrustServerCertificate=True");
+            await conn.OpenAsync();
+            var result = await conn.ExecuteReaderAsync("Update episodes set Done=@doneInt, EncodePath = @encodePath,Encoded = @doneInt,Path = NULL" +
+                                          " where Id = @episodeId",
+                new
+                {
+                    encodePath,
+                    episodeId,
+                    doneInt
+                });
+            await conn.CloseAsync();
+        }
+
+        private static async Task<string> EncodeVideo(string inputFile, string logo, string fontName, int fontSize, int bitRate)
+        {
+
+            var subtitlePath = inputFile.Contains("'") ? await ExportSubtitle(inputFile) : inputFile;
+
+            
+            var outputFile = Path.ChangeExtension(inputFile, ".mp4");
+
+            if (File.Exists(outputFile) && File.Exists(inputFile) && CheckAvailableSize(inputFile, outputFile))
+            {
+                Console.WriteLine("File đã xử lý xong");
+                return outputFile;
+            }
+
+            var argumentsBuilder = new StringBuilder();
+            argumentsBuilder.Append($"-i \"{inputFile}\" ");
+            argumentsBuilder.Append($"-i \"{logo}\" ");
+            argumentsBuilder.Append("-filter_complex \"");
+            argumentsBuilder.Append("[0:v][1:v] overlay=x=main_w-overlay_w-(main_w*0.01):y=main_h*0.01, ");
+            argumentsBuilder.Append($"subtitles='{EscapeString(DoubleSlash(subtitlePath))}':force_style='Fontname={fontName},FontSize={fontSize}'\" ");
+            argumentsBuilder.Append($"-c:v h264_nvenc -b:v {bitRate}k -c:a copy ");
+            argumentsBuilder.Append($"\"{outputFile}\"");
+            argumentsBuilder.Append(" -y");
+            
+            string arguments = argumentsBuilder.ToString();
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = @"Tools\ffmpeg",
+                Arguments = arguments,
+                UseShellExecute = true,
+                CreateNoWindow = false
+            };
+
+            using var process = new Process();
+            process.StartInfo = startInfo;
+            process.Start();
+
+            await process.WaitForExitAsync();
+
+            File.Delete(subtitlePath);
+            return outputFile;
+        }
+
+        private static async Task<string> ExportSubtitle(string inputFile)
+        {
+            var argumentBuilder = new StringBuilder();
+
+            var randomFile = Path.GetRandomFileName();
+            randomFile = Path.ChangeExtension(randomFile, ".srt");
+
+            argumentBuilder.Append($"tracks \"{inputFile}\" ");
+            argumentBuilder.Append($"2:\"{randomFile}\"");
+
+
+            var arguments = argumentBuilder.ToString();
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = @"Tools\mkvextract",
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = new Process();
+            process.StartInfo = startInfo;
+            process.Start();
+            await process.WaitForExitAsync();
+
+            return randomFile;
+        }
+
+        private static bool CheckAvailableSize(string inputFile, string outputFile)
+        {
+            var inputInfo = new FileInfo(inputFile);
+            var outputInfo = new FileInfo(outputFile);
+            return inputInfo.Length / 3 < outputInfo.Length;
+
+        }
+
+        private static string EscapeString(string input)
+        {
+            return input
+                //.Replace(":", @"\:")
+                .Replace("'", @"''");
+        }
+
+        private static string DoubleSlash(string input)
         {
             return input.Replace(@"\", @"\\");
         }

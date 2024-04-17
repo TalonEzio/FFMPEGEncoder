@@ -82,6 +82,7 @@ namespace FFMPEGEncoder
 
             Console.WriteLine($"Nhớ cài đặt font \"{fontName}\" trước khi chạy nhé!");
 
+            Console.Write($"Kích cỡ font (mặc định {Settings.FontSize}, 0 <= FontSize <= {Settings.FontSizeMax}): ");
 
             Console.Write($"Kích cỡ font (mặc định {Settings.FontSize}, 0 <= FontSize <= {Settings.FontSizeMax}): ");
 
@@ -309,7 +310,6 @@ namespace FFMPEGEncoder
         private static async Task<(string, string)> EncodeVideoWithFFmpeg(string inputFile, Settings settings, string marquee, bool enableCmd, bool enableQuery)
         {
             var subtitlePath = await ExportSubtitle(inputFile, enableCmd, enableQuery);
-
 
             var outputFile = Path.ChangeExtension(inputFile, ".mp4");
 
